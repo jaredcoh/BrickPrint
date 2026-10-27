@@ -3,6 +3,13 @@
 Static site: find a missing LEGO piece (by set, part number, pasted link, or category), preview it in 3D,
 download an STL generated in the browser, and get filament suggestions for a LEGO color.
 
+- **Multi-color parts**: about a hundred parts (windows, signs, hinged and assembled parts) carry real multiple
+  colors in their LDraw model. They show in color in the viewer and export as a multi-color 3MF
+  (one material per color; the "main" color follows the LEGO color you pick). The plain STL stays one color.
+- **Printed and sticker parts**: LDraw stores printed artwork as image textures, so these print as the plain shape;
+  the part page shows the Rebrickable photo as a guide. Parts without a photo get a 3D render instead.
+- **Names** are tidied from Rebrickable's (`2x4` becomes `2 x 4`, `w/` becomes `with`).
+
 ## Run
 
 ```
@@ -15,6 +22,8 @@ Open http://localhost:8765 (opening index.html as a file won't work: it fetches 
 Download into one folder (`rb/` and `spool/` and `ldraw/`):
 - Rebrickable CSVs (`sets, inventories, inventory_parts, parts, part_categories, colors, themes`) from https://rebrickable.com/downloads/
 - LDraw `complete.zip` from https://library.ldraw.org/library/updates/complete.zip (extract to `ldraw/`)
+- Optional: LDraw unofficial parts `ldrawunf.zip` from https://library.ldraw.org/library/unofficial/ldrawunf.zip (extract to `unf/`)
+- Also needed from Rebrickable: `part_relationships.csv`
 - SpoolmanDB `filaments/*.json` from https://github.com/Donkie/SpoolmanDB into `spool/`
 
 ```

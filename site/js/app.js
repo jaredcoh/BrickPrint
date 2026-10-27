@@ -114,11 +114,65 @@ function setNav(name) {
 }
 function mount(...nodes) {
   const app = document.getElementById("app");
-  app.replaceChildren(...nodes);
+  app.replaceChildren(...nodes.filter(n => n != null && n !== false));
   window.scrollTo(0, 0);
 }
 function pic(url, alt) {
   return url ? h("img", {src: url, alt, loading: "lazy", referrerpolicy: "no-referrer"}) : h("span", {class: "hint"}, "no photo");
+}
+// Parts without a photo get a small render of their own 3D model instead (colored if the model has colors).
+let thumbGL = null;
+const thumbCache = new Map();
+async function renderThumb(p, hex) {
+  const key = meshId(p) + "/" + hex;
+  if (thumbCache.has(key)) return thumbCache.get(key);
+  const m = await loadMesh(meshId(p));
+  if (!thumbGL) {
+    const renderer = new THREE.WebGLRenderer({antialias: true, alpha: true, preserveDrawingBuffer: true});
+    renderer.setSize(220, 165);
+    const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(30, 220 / 165, 0.1, 2000);
+    cam.up.set(0, 0, 1);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x666677, 0.9));
+    const dl = new THREE.DirectionalLight(0xffffff, 0.9); dl.position.set(40, -60, 80); scene.add(dl);
+    thumbGL = {renderer, scene, cam, mat: new THREE.MeshStandardMaterial({roughness: 0.45, metalness: 0})};
+  }
+  const {renderer, scene, cam, mat} = thumbGL;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(m.pos, 3));
+  g.setIndex(new THREE.BufferAttribute(m.idx, 1));
+  const g2 = g.toNonIndexed(); g2.computeVertexNormals(); g.dispose();
+  if (m.attr) {
+    g2.setAttribute("color", new THREE.BufferAttribute(triColors(m.attr, [hex, ...(p.pal || [])]), 3));
+    mat.vertexColors = true; mat.color.set(0xffffff);
+  } else { mat.vertexColors = false; mat.color.set("#" + hex); }
+  mat.needsUpdate = true;
+  const mesh = new THREE.Mesh(g2, mat);
+  scene.add(mesh);
+  const bb = new THREE.Box3().setFromBufferAttribute(g2.getAttribute("position"));
+  const size = bb.getSize(new THREE.Vector3()), r = Math.max(size.x, size.y, size.z) * 0.9 + 4;
+  cam.position.set(r * 2.6 * Math.sin(1.0) * Math.cos(-0.8), r * 2.6 * Math.sin(1.0) * Math.sin(-0.8), r * 2.6 * Math.cos(1.0));
+  cam.lookAt(0, 0, size.z / 2);
+  renderer.render(scene, cam);
+  const url = renderer.domElement.toDataURL("image/png");
+  scene.remove(mesh); g2.dispose();
+  thumbCache.set(key, url);
+  return url;
+}
+const thumbObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    thumbObserver.unobserve(e.target);
+    e.target._render && e.target._render();
+  }
+}, {rootMargin: "200px"}) : null;
+function partPic(p, hex) {
+  if (p.img) return pic(p.img, p.name);
+  const box = h("span", {class: "hint"}, "rendering…");
+  box._render = () => renderThumb(p, hex || "C91A09")
+    .then(u => box.replaceWith(h("img", {src: u, alt: p.name + " (3D render)", title: "3D render from the LDraw model; no photo available"})))
+    .catch(() => { box.textContent = "no photo"; });
+  thumbObserver ? thumbObserver.observe(box) : box._render();
+  return box;
 }
 function loadingNode(t) { return h("p", {class: "hint"}, t || "Loading…"); }
 function partCard(p, opts) {
@@ -126,10 +180,11 @@ function partCard(p, opts) {
   const q = opts.color != null ? "?color=" + opts.color : "";
   const col = opts.color != null ? D.colorById.get(opts.color) : null;
   return h("a", {class: "item", href: "#/part/" + encodeURIComponent(p.id) + q},
-    h("div", {class: "pic"}, pic(p.img, p.name), opts.qty ? h("span", {class: "qty", title: "Quantity in this set"}, "×" + opts.qty) : null),
+    h("div", {class: "pic"}, partPic(p, col && col.hex), opts.qty ? h("span", {class: "qty", title: "Quantity in this set"}, "×" + opts.qty) : null),
     h("b", {}, p.name),
     h("small", {}, "Part " + p.id + " · " + p.cat),
     p.kind ? h("small", {}, h("span", {class: "badge"}, p.kind === "print" ? "plain shape of printed part" : "alternate mold")) : null,
+    p.pal ? h("small", {}, h("span", {class: "badge"}, "multi-color · " + (p.pal.length + 1) + " colors")) : null,
     col ? h("small", {}, swatch(col.hex, col.trans), col.name) : null,
     h("div", {class: "src"}, "Source: Rebrickable (name, photo) · LDraw (3D)"));
 }
@@ -151,7 +206,11 @@ async function loadMesh(id) {
       let dir = null;
       if (flags & 1) { dir = new Int8Array(buf.slice(o, o + nv * 3)); o += nv * 3; }
       const idx = flags & 2 ? new Uint32Array(buf.slice(o, o + ni * 4)) : new Uint16Array(buf.slice(o, o + ni * 2));
-      return {pos, dir, idx};
+      o += flags & 2 ? ni * 4 : ni * 2;
+      // flags & 4: one byte per triangle. 0 = the color the user picks, 1.. = fixed color from the palette,
+      // bit 7 = printed artwork (a thin layer lying on the surface)
+      const attr = flags & 4 ? new Uint8Array(buf.slice(o, o + ni / 3)) : null;
+      return {pos, dir, idx, attr};
     }));
   }
   return meshCache.get(id);
@@ -163,12 +222,14 @@ function applyTweak(m, mm) {
   return out;
 }
 function buildStl(m, pos) {
-  const n = m.idx.length / 3, buf = new ArrayBuffer(84 + n * 50), dv = new DataView(buf);
+  const tris = [];
+  for (let t = 0; t < m.idx.length / 3; t++) if (!m.attr || !(m.attr[t] & 0x80)) tris.push(t);
+  const n = tris.length, buf = new ArrayBuffer(84 + n * 50), dv = new DataView(buf);
   const hdr = "BrickPrint STL (mm). Geometry: LDraw Parts Library, CC BY.";
   for (let i = 0; i < hdr.length; i++) dv.setUint8(i, hdr.charCodeAt(i));
   dv.setUint32(80, n, true);
   let o = 84;
-  for (let t = 0; t < n; t++) {
+  for (const t of tris) {
     const a = m.idx[t * 3] * 3, b = m.idx[t * 3 + 1] * 3, c = m.idx[t * 3 + 2] * 3;
     const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
     const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
@@ -179,12 +240,58 @@ function buildStl(m, pos) {
   }
   return new Blob([buf], {type: "model/stl"});
 }
+// Minimal store-only zip, enough for a 3MF package.
+function zipStore(files) {
+  const enc = new TextEncoder(), parts = [], central = [];
+  let off = 0;
+  for (const [name, text] of files) {
+    const nb = enc.encode(name), data = enc.encode(text), crc = crc32bytes(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint32(14, crc, true);
+    lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, nb.length, true);
+    parts.push(lh.buffer, nb, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint32(16, crc, true);
+    ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, nb.length, true);
+    ch.setUint32(42, off, true);
+    central.push(ch.buffer, nb);
+    off += 30 + nb.length + data.length;
+  }
+  const csize = central.reduce((a, b) => a + b.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, csize, true); end.setUint32(16, off, true);
+  return new Blob([...parts, ...central, end.buffer], {type: "model/3mf"});
+}
+function crc32bytes(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+// One object, one base material per color, each triangle points at its material.
+function build3mf(m, pos, pal, mainHex, title) {
+  const hexes = [mainHex, ...pal];
+  const v = [];
+  for (let i = 0; i < pos.length; i += 3) v.push('<vertex x="' + pos[i].toFixed(4) + '" y="' + pos[i + 1].toFixed(4) + '" z="' + pos[i + 2].toFixed(4) + '"/>');
+  const t = [];
+  for (let i = 0; i < m.idx.length; i += 3) t.push('<triangle v1="' + m.idx[i] + '" v2="' + m.idx[i + 1] + '" v3="' + m.idx[i + 2] + '" pid="1" p1="' + (m.attr ? m.attr[i / 3] & 0x7f : 0) + '"/>');
+  const model = '<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+    + '<metadata name="Title">' + title + '</metadata><metadata name="Designer">BrickPrint (geometry: LDraw Parts Library, CC BY)</metadata>'
+    + '<resources><basematerials id="1">' + hexes.map((x, i) => '<base name="' + (i ? "Color " + i : "Main color") + '" displaycolor="#' + x + 'FF"/>').join("") + '</basematerials>'
+    + '<object id="2" type="model" pid="1" pindex="0"><mesh><vertices>' + v.join("") + '</vertices><triangles>' + t.join("") + '</triangles></mesh></object></resources>'
+    + '<build><item objectid="2"/></build></model>';
+  return zipStore([
+    ["[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>'],
+    ["_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'],
+    ["3D/3dmodel.model", model]]);
+}
 function download(blob, name) {
   const a = h("a", {href: URL.createObjectURL(blob), download: name});
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 const meshId = p => p.mesh || p.id;
+async function downloadPart3mf(p, mainHex) {
+  const m = await loadMesh(meshId(p));
+  const mm = tweakState.on ? tweakState.mm : 0;
+  download(build3mf(m, applyTweak(m, mm), p.pal || [], mainHex, "LEGO " + p.id), "lego-" + p.id + "-color.3mf");
+}
 async function downloadPartStl(p) {
   const id = p.id;
   const m = await loadMesh(meshId(p));
@@ -194,6 +301,16 @@ async function downloadPartStl(p) {
 }
 
 // ---------- 3D viewer (three.js core + minimal orbit) ----------
+// Per-vertex colors (3 vertices per triangle, non-indexed) from the per-triangle palette index.
+function triColors(attr, hexes) {
+  const table = hexes.map(x => new THREE.Color("#" + x));
+  const col = new Float32Array(attr.length * 9);
+  for (let t = 0; t < attr.length; t++) {
+    const c = table[attr[t] & 0x7f] || table[0];
+    for (let k = 0; k < 3; k++) { col[t * 9 + k * 3] = c.r; col[t * 9 + k * 3 + 1] = c.g; col[t * 9 + k * 3 + 2] = c.b; }
+  }
+  return col;
+}
 function makeViewer(container) {
   const w = container.clientWidth || 400, hgt = container.clientHeight || 400;
   const renderer = new THREE.WebGLRenderer({antialias: true, alpha: true});
@@ -206,7 +323,18 @@ function makeViewer(container) {
   scene.add(new THREE.HemisphereLight(0xffffff, 0x666677, 0.9));
   const dl = new THREE.DirectionalLight(0xffffff, 0.9); dl.position.set(40, -60, 80); scene.add(dl);
   const mat = new THREE.MeshStandardMaterial({color: 0xcc0000, roughness: 0.45, metalness: 0});
-  let mesh = null, radius = 40, theta = -0.8, phi = 1.0, dist = 100;
+  let mesh = null, radius = 40, theta = -0.8, phi = 1.0, dist = 100, mainHex = "CC0000", mainTrans = false;
+  const paint = () => {
+    if (!mesh) return;
+    const attr = mesh.userData.attr, pal = mesh.userData.pal;
+    mat.vertexColors = !!attr;
+    mat.transparent = !!mainTrans; mat.opacity = mainTrans ? 0.65 : 1;
+    if (attr) {
+      mat.color.set(0xffffff);
+      mesh.geometry.setAttribute("color", new THREE.BufferAttribute(triColors(attr, [mainHex, ...pal]), 3));
+    } else mat.color.set("#" + mainHex);
+    mat.needsUpdate = true;
+  };
   const render = () => {
     cam.position.set(dist * Math.sin(phi) * Math.cos(theta), dist * Math.sin(phi) * Math.sin(theta), dist * Math.cos(phi));
     cam.lookAt(0, 0, radius * 0.0 + (mesh ? mesh.userData.cz : 0));
@@ -229,7 +357,7 @@ function makeViewer(container) {
   });
   ro.observe(container);
   return {
-    setMesh(m, pos) {
+    setMesh(m, pos, pal) {
       if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
       const g = new THREE.BufferGeometry();
       g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
@@ -241,11 +369,13 @@ function makeViewer(container) {
       const size = bb.getSize(new THREE.Vector3());
       radius = Math.max(size.x, size.y, size.z) * 0.9 + 4;
       mesh.userData.cz = size.z / 2;
+      mesh.userData.attr = m.attr; mesh.userData.pal = pal || [];
+      paint();
       if (!this._fit) { dist = radius * 3.2; this._fit = true; }
       scene.add(mesh); render();
     },
     setColor(hex, trans) {
-      mat.color.set("#" + hex); mat.transparent = !!trans; mat.opacity = trans ? 0.65 : 1; mat.needsUpdate = true; render();
+      mainHex = hex; mainTrans = !!trans; paint(); render();
     },
     dispose() { ro.disconnect(); renderer.dispose(); el.remove(); }
   };
@@ -324,6 +454,8 @@ function colorPicker(onPick, selectedId) {
   draw();
   return h("div", {}, search, grid, srcTag("rb", "color values (colors.csv)"));
 }
+
+const PRINTED_RE = /(?:pr|pb|pat|px|ps|pd|pt|ph|pm)\d|stk\d/;
 
 // ---------- views ----------
 async function viewHome() {
@@ -452,11 +584,12 @@ async function viewBrowse(params) {
     cats.map(c => h("option", {value: c, selected: c === cat || null}, c + " (" + parts.filter(p => p.cat === c).length + ")")));
   const grid = h("div", {class: "grid"}), count = h("p", {class: "hint"});
   const kindSel = h("select", {"aria-label": "Part type"},
-    h("option", {value: "base"}, "Base parts (no printed variants)"), h("option", {value: "all"}, "Include printed-design and alternate parts"));
+    h("option", {value: "base"}, "Base parts (no printed variants)"), h("option", {value: "all"}, "Include printed-design and alternate parts"),
+    h("option", {value: "mc"}, "Multi-color parts only (colors built into the model)"));
   let limit = 60;
   function draw() {
     const q = search.value.trim().toLowerCase();
-    const list = parts.filter(p => (kindSel.value === "all" || !p.kind) && (!sel.value || p.cat === sel.value) && (!q || (p.id + " " + p.name).toLowerCase().includes(q)));
+    const list = parts.filter(p => (kindSel.value === "all" || (kindSel.value === "mc" ? p.pal : !p.kind)) && (!sel.value || p.cat === sel.value) && (!q || (p.id + " " + p.name).toLowerCase().includes(q)));
     count.textContent = list.length + " parts";
     grid.replaceChildren(...list.slice(0, limit).map(p => partCard(p)));
     if (list.length > limit) grid.append(h("button", {class: "btn sec", onclick: () => { limit += 60; draw(); }}, "Show more"));
@@ -502,7 +635,7 @@ async function viewPart(id, params) {
   async function refresh() {
     const m = await mesh;
     const mm = tweakState.on ? tweakState.mm : 0;
-    vw.setMesh(m, applyTweak(m, mm));
+    vw.setMesh(m, applyTweak(m, mm), p.pal);
   }
   updateColorLine();
   const cb = h("input", {type: "checkbox", id: "tw", checked: tweakState.on || null, onchange: () => { tweakState.on = cb.checked; saveTweak(); drawTweak(); refresh(); }});
@@ -528,14 +661,18 @@ async function viewPart(id, params) {
     h("h1", {}, p.name),
     p.kind === "print" ? h("p", {class: "note"}, "This part has a printed design or pattern. The STL is the plain shape of part " + meshId(p) + "; the artwork isn't modelled. Print it in the base color, then add a sticker or paint. (Link between parts: Rebrickable part relationships.)") : null,
     p.kind === "alt" ? h("p", {class: "note"}, "Rebrickable lists this as an alternate or mold variant of part " + meshId(p) + ". The STL uses that part's shape, so small details may differ from your piece.") : null,
+    p.pal ? h("p", {class: "note"}, "This model has " + (p.pal.length + 1) + " colors built in (the main color follows the LEGO color you pick; the other " + p.pal.length + " are fixed). Download the plain STL for one-color printing, or the 3MF to load it into a multi-color slicer with one material per color. The 3MF export has not been tested in slicers yet.") : null,
+    !p.pal && p.kind !== "print" && PRINTED_RE.test(p.id) ? h("p", {class: "note"}, "This part has a printed design or sticker. The LDraw library stores printed artwork as image textures, so the STL is the plain shape only. Use the photo as a guide, then add a sticker or paint.") : null,
     p.unf ? h("p", {class: "note"}, "This model comes from LDraw's unofficial library: not yet officially reviewed, so check dimensions before printing.") : null,
     h("p", {class: "hint"}, "Part " + p.id + " · " + p.cat + " · about " + dims + " mm (X × Y × Z) · " + p.tris.toLocaleString() + " triangles"),
     h("div", {class: "split"},
       h("div", {}, viewer, h("p", {class: "hint"}, "Drag to rotate, scroll to zoom. Printed with the flat side down."),
         h("div", {class: "row"},
           h("button", {class: "btn", onclick: e => { e.target.disabled = true; downloadPartStl(p).finally(() => e.target.disabled = false); }}, "Download STL"),
+          p.pal ? h("button", {class: "btn sec", onclick: e => { e.target.disabled = true; downloadPart3mf(p, color.hex).finally(() => e.target.disabled = false); }}, "Download 3MF (multi-color)") : null,
           h("span", {class: "hint"}, "Generated in your browser from the LDraw model")),
         srcTag("ldraw", (p.unf ? "unofficial library, " : "") + "geometry by " + (p.author || "LDraw contributors") + (p.license ? " · " + p.license : "")),
+        p.img ? h("div", {class: "photo"}, pic(p.img, p.name + " photo"), h("div", {class: "src"}, "Photo: Rebrickable (one color variant; your color may differ)")) : null,
         h("div", {class: "sticky-pad"}, tweakBox)),
       h("div", {class: "panel"},
         h("div", {class: "card"}, h("h3", {}, "LEGO color"), colorLine, pickerNode),
@@ -599,9 +736,10 @@ function viewSources() {
     h("p", {}, "LEGO® is a trademark of the LEGO Group, which does not sponsor, authorize or endorse this site. This is a non-commercial fan tool for reprinting pieces you've lost. LDraw models are © their authors under the licenses above; STL files generated here carry that attribution."),
     h("h2", {}, "Known limits"),
     h("ul", {}, [
-      "A part is included only if it, or a base part linked to it by Rebrickable, has an LDraw model. Printed parts print as the plain shape (no artwork); alternate molds may differ in small details. Unofficial LDraw models are flagged on their page.",
+      "A part is included only if it, or a base part linked to it by Rebrickable, has an LDraw model. Printed and sticker artwork is stored in LDraw as image textures, so most printed parts print as the plain shape (no artwork) and the photo is your guide. About a hundred parts (windows, signs, hinged and assembled parts) carry real multiple colors in their model and offer a multi-color 3MF. Alternate molds may differ in small details. Unofficial LDraw models are flagged on their page.",
       "LDraw models describe how a part looks, not how it prints. Clutch fit depends on your printer; start with the tweak offset and test-print.",
-      "Filament swatches are listed colors, not measured prints."
+      "Filament swatches are listed colors, not measured prints.",
+      "Part names are tidied from Rebrickable's (spacing, \u201c2x4\u201d to \u201c2 x 4\u201d, \u201cw/\u201d to \u201cwith\u201d). The original name is kept in the data."
     ].map(t => h("li", {}, t))));
 }
 
