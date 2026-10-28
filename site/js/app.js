@@ -476,6 +476,7 @@ async function viewHome() {
     tabs.replaceChildren(...Object.entries(MODES).map(([k, v]) =>
       h("button", {class: "tab", role: "tab", "aria-selected": k === mode ? "true" : "false", onclick: () => { mode = k; store.set("mode", k); input.value = ""; drawTabs(); run(); }}, v[0])),
       h("a", {class: "tab", href: "#/browse", style: {textDecoration: "none"}}, "Browse categories"),
+      h("a", {class: "tab", href: "#/printed", style: {textDecoration: "none"}}, "Printed bricks"),
       h("a", {class: "tab", href: "#/colors", style: {textDecoration: "none"}}, "By color (filament only)"));
     input.placeholder = MODES[mode][1];
     help.textContent = MODES[mode][2];
@@ -600,6 +601,33 @@ async function viewBrowse(params) {
     h("p", {class: "lead"}, "Categories follow Rebrickable's part categories."),
     h("div", {class: "row"}, h("div", {style: {flex: "1 1 220px"}}, sel), h("div", {style: {flex: "2 1 260px"}}, search), h("div", {style: {flex: "1 1 220px"}}, kindSel)),
     count, grid, srcTag("rb", "names and categories"));
+}
+
+async function viewPrinted(params) {
+  setNav("printed");
+  const {parts} = await core();
+  const isPrinted = p => p.kind === "print" || PRINTED_RE.test(p.id);
+  const all = parts.filter(isPrinted);
+  const cats = [...new Set(all.map(p => p.cat))].sort();
+  const search = h("input", {type: "search", placeholder: "Try computer, screen, keyboard, face, flag…", "aria-label": "Filter printed parts", value: params.get("q") || ""});
+  const sel = h("select", {"aria-label": "Category"}, h("option", {value: ""}, "All categories"),
+    cats.map(c => h("option", {value: c, selected: c === params.get("cat") || null}, c + " (" + all.filter(p => p.cat === c).length + ")")));
+  const grid = h("div", {class: "grid"}), count = h("p", {class: "hint"});
+  let limit = 60;
+  function draw() {
+    const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const list = all.filter(p => (!sel.value || p.cat === sel.value) && words.every(w => (p.id + " " + p.name).toLowerCase().includes(w)));
+    count.textContent = list.length.toLocaleString() + " printed and sticker parts";
+    grid.replaceChildren(...list.slice(0, limit).map(p => partCard(p)));
+    if (list.length > limit) grid.append(h("button", {class: "btn sec", onclick: () => { limit += 60; draw(); }}, "Show more"));
+  }
+  search.addEventListener("input", () => { limit = 60; draw(); }); sel.addEventListener("change", () => { limit = 60; draw(); });
+  draw();
+  mount(h("h1", {}, "Printed bricks"),
+    h("p", {class: "lead"}, "Tiles and bricks with a printed picture or sticker: computer screens, keyboards, faces, signs and more. Each opens with its photo and the plain shape to print."),
+    h("p", {class: "note"}, "LDraw stores printed artwork as image textures, so the STL is the plain shape only. Print it in the base color on a multi-color printer, then paint or sticker the picture using the photo as a guide. Painting the artwork in filament colors is not built yet."),
+    h("div", {class: "row"}, h("div", {style: {flex: "1 1 220px"}}, sel), h("div", {style: {flex: "2 1 260px"}}, search)),
+    count, grid, srcTag("rb", "names, categories and photos"));
 }
 
 async function viewPart(id, params) {
@@ -754,6 +782,7 @@ async function route() {
     else if (seg[0] === "set" && seg[1]) await viewSet(seg[1]);
     else if (seg[0] === "part" && seg[1]) await viewPart(seg[1], params);
     else if (seg[0] === "browse") await viewBrowse(params);
+    else if (seg[0] === "printed") await viewPrinted(params);
     else if (seg[0] === "colors") await viewColors(params);
     else if (seg[0] === "sources") viewSources();
     else await viewHome();
