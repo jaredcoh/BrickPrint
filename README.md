@@ -10,6 +10,12 @@ download an STL generated in the browser, and get filament suggestions for a LEG
   the part page shows the Rebrickable photo as a guide. Parts without a photo get a 3D render instead.
 - **Names** are tidied from Rebrickable's (`2x4` becomes `2 x 4`, `w/` becomes `with`).
 
+## Multi-color printing (Snapmaker U1 and other multi-material printers)
+
+Parts that carry several colors in their LDraw model export as a 3MF with one base material per color. In
+Snapmaker Orca or OrcaSlicer the colors can be mapped to your U1 filaments, so one print comes out in all its
+colors. This export has not been tested in a slicer yet. Printed and sticker parts are plain shapes (see above).
+
 ## Run
 
 ```
