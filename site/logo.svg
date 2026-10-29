@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BrickPrint logo">
+  <rect width="64" height="64" rx="14" fill="#16181d"/>
+  <polygon points="32,13 55,25 32,37 9,25" fill="#ee5a4d"/>
+  <polygon points="9,25 32,37 32,53 9,41" fill="#b9322a"/>
+  <polygon points="32,37 55,25 55,41 32,53" fill="#d4372c"/>
+  <g fill="#ff8a7d"><ellipse cx="32" cy="19.5" rx="5.2" ry="2.7"/><ellipse cx="43.5" cy="25.5" rx="5.2" ry="2.7"/><ellipse cx="32" cy="31.5" rx="5.2" ry="2.7"/><ellipse cx="20.5" cy="25.5" rx="5.2" ry="2.7"/></g>
+  <g stroke="#f2c230" stroke-width="1.6" stroke-linecap="round" opacity=".95"><line x1="35" y1="42" x2="52" y2="33.2"/><line x1="35" y1="45.6" x2="52" y2="36.8"/><line x1="35" y1="49.2" x2="52" y2="40.4"/></g>
+  <g stroke="#7e211b" stroke-width="1.2" stroke-linecap="round" opacity=".7"><line x1="12" y1="29" x2="29" y2="37.8"/><line x1="12" y1="33" x2="29" y2="41.8"/><line x1="12" y1="37" x2="29" y2="45.8"/></g>
+</svg>

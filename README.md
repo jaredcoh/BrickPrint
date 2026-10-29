@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.svg" alt="BrickPrint" width="560"></p>
+
 # BrickPrint
 
 Static site: find a missing LEGO piece (by set, part number, pasted link, or category), preview it in 3D,
