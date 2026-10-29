@@ -264,22 +264,66 @@ function zipStore(files) {
   return new Blob([...parts, ...central, end.buffer], {type: "model/3mf"});
 }
 function crc32bytes(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
-// One object, one base material per color, each triangle points at its material.
+// Orca / Snapmaker Orca project layout (same as the slicer saves it): a root model that points at a mesh file, per-triangle
+// "paint_color" codes for the filament, a colour group for other viewers, and project settings that list the filaments.
+function paintCode(i) {
+  const state = Math.min(255, i + 1);
+  if (state === 1) return "4";
+  if (state === 2) return "8";
+  const nibbles = ["C"];
+  let v = state - 3;
+  while (v >= 15) { nibbles.push("F"); v -= 15; }
+  nibbles.push(v.toString(16).toUpperCase());
+  return nibbles.reverse().join("");
+}
+const xmlEsc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 function build3mf(m, pos, pal, mainHex, title) {
   const hexes = [mainHex, ...pal];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity;
+  for (let i = 0; i < pos.length; i += 3) {
+    minX = Math.min(minX, pos[i]); maxX = Math.max(maxX, pos[i]);
+    minY = Math.min(minY, pos[i + 1]); maxY = Math.max(maxY, pos[i + 1]);
+    minZ = Math.min(minZ, pos[i + 2]);
+  }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const v = [];
-  for (let i = 0; i < pos.length; i += 3) v.push('<vertex x="' + pos[i].toFixed(4) + '" y="' + pos[i + 1].toFixed(4) + '" z="' + pos[i + 2].toFixed(4) + '"/>');
+  for (let i = 0; i < pos.length; i += 3) v.push('<vertex x="' + (pos[i] - cx).toFixed(4) + '" y="' + (pos[i + 1] - cy).toFixed(4) + '" z="' + (pos[i + 2] - minZ).toFixed(4) + '"/>');
   const t = [];
-  for (let i = 0; i < m.idx.length; i += 3) t.push('<triangle v1="' + m.idx[i] + '" v2="' + m.idx[i + 1] + '" v3="' + m.idx[i + 2] + '" pid="1" p1="' + (m.attr ? m.attr[i / 3] & 0x7f : 0) + '"/>');
-  const model = '<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
-    + '<metadata name="Title">' + title + '</metadata><metadata name="Designer">BrickPrint (geometry: LDraw Parts Library, CC BY)</metadata>'
-    + '<resources><basematerials id="1">' + hexes.map((x, i) => '<base name="' + (i ? "Color " + i : "Main color") + '" displaycolor="#' + x + 'FF"/>').join("") + '</basematerials>'
-    + '<object id="2" type="model" pid="1" pindex="0"><mesh><vertices>' + v.join("") + '</vertices><triangles>' + t.join("") + '</triangles></mesh></object></resources>'
-    + '<build><item objectid="2"/></build></model>';
+  for (let i = 0; i < m.idx.length; i += 3) {
+    const c = Math.min(hexes.length - 1, m.attr ? m.attr[i / 3] & 0x7f : 0);
+    t.push('<triangle v1="' + m.idx[i] + '" v2="' + m.idx[i + 1] + '" v3="' + m.idx[i + 2] + '" pid="1" p1="' + c + '" p2="' + c + '" p3="' + c + '" paint_color="' + paintCode(c) + '"/>');
+  }
+  const name = xmlEsc(title);
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  const root = xml + '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">'
+    + '<metadata name="Title">' + name + '</metadata><metadata name="Application">Snapmaker Orca</metadata>'
+    + '<metadata name="Designer">BrickPrint (geometry: LDraw Parts Library, CC BY)</metadata><metadata name="ColorSource">TrianglePaintColors</metadata>'
+    + '<resources><object id="2" type="model" name="' + name + '"><components><component objectid="1002" p:path="/3D/Objects/object_1.model"/></components></object></resources>'
+    // the mesh is centred on its own origin; put it in the middle of the U1 plate (x 0.5-270.5, y 1-271)
+    + '<build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 135.5 136 0" printable="1"/></build></model>';
+  const mesh = xml + '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">'
+    + '<resources><m:colorgroup id="1">' + hexes.map(x => '<m:color color="' + x + 'FF"/>').join("") + '</m:colorgroup>'
+    + '<object id="1002" type="model" name="' + name + '"><mesh><vertices>' + v.join("") + '</vertices><triangles>' + t.join("") + '</triangles></mesh></object></resources></model>';
+  const names = hexes.map((x, i) => i ? "Color " + i : "Main color");
+  const same = val => hexes.map(() => val);
+  const settings = JSON.stringify({
+    version: "2.3.0", generator: "BrickPrint",
+    filament_colour: hexes.map(x => "#" + x), filament_color: hexes.map(x => "#" + x), filament_colors: hexes.map(x => "#" + x),
+    filament_colour_type: same("custom"), filament_type: same("PLA"), filament_is_support: same("0"), filament_printable: same("1"),
+    filament_diameter: same("1.75"), filament_density: same("1.24"), filament_cost: same("0"),
+    filament_ids: names, filament_settings_id: names, filament_vendor: same("Generic"),
+    enable_support: "0", curr_bed_type: "", printer_model: "", printer_variant: "", from: "User", inherits: ""
+  }, null, 2);
+  const modelSettings = xml + '<config><plate><metadata key="plater_id" value="1"/><metadata key="plater_name" value="Plate 1"/><metadata key="locked" value="false"/>'
+    + '<model_instance><metadata key="object_id" value="2"/><metadata key="instance_id" value="0"/><metadata key="identify_id" value="1000"/></model_instance></plate>'
+    + '<object id="2"><metadata key="name" value="' + name + '"/><metadata key="extruder" value="1"/><metadata key="source_file" value="3D/3dmodel.model"/></object></config>';
   return zipStore([
-    ["[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>'],
-    ["_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'],
-    ["3D/3dmodel.model", model]]);
+    ["[Content_Types].xml", xml + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/octet-stream"/></Types>'],
+    ["_rels/.rels", xml + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'],
+    ["3D/3dmodel.model", root],
+    ["3D/Objects/object_1.model", mesh],
+    ["Metadata/project_settings.config", settings],
+    ["Metadata/model_settings.config", modelSettings]]);
 }
 function download(blob, name) {
   const a = h("a", {href: URL.createObjectURL(blob), download: name});
